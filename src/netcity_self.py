@@ -1,100 +1,76 @@
 import ipaddress
+import json
 import os
 import platform
 import socket
 import sys
+import netifaces
 import psutil
 
-import netifaces
-
-# Import port scanning and protocol functionality from local modules
 from ports import scan_ports
-from protocols import scan_protocols
+from protocols import scan_protocols, scan_ipv6_protocols
 
 
-def is_admin():
+def is_admin() -> bool:
     """Check if the script is running with elevated privileges."""
     try:
-        if os.name == "nt":
-            import ctypes
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        else:
-            return os.getuid() == 0
-    except Exception:
-        return False
+        return os.getuid() == 0
+    except AttributeError:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
 
 
-def request_admin():
-    """Inform the user they need to run with sudo/admin."""
-    print("\n[!] This script requires elevated privileges to run.")
-    if os.name == "nt":
-        print("    → Right-click the terminal and choose 'Run as administrator'.")
-    else:
-        print("    → Run it with:  sudo python netcity_self.py")
-    print()
-    sys.exit(1)
-
-
-def get_system_details():
-    """Collect basic system information about the machine."""
-    return {
-        "hostname": socket.gethostname(),
-        "os": platform.system(),
-        "os_release": platform.release(),
-        "os_version": platform.version(),
-        "architecture": platform.machine(),
-        "processor": platform.processor(),
-        "python_version": platform.python_version(),
-        "platform": platform.platform(),
-    }
-
-
-def get_gateway_details():
-    """Collect default IPv4 gateway information."""
-    gateway = netifaces.gateways()
-    default_gateway = gateway.get("default", {}).get(netifaces.AF_INET)
-
-    if not default_gateway:
-        return None
-
-    gateway_ip, interface = default_gateway
-
-    return {
-        "ip": gateway_ip,
-        "interface": interface,
-    }
-
-
-def classify_ip(ip):
-    """Classify IP addresses."""
+def classify_ip(ip_str: str) -> str:
+    """Classify an IP address as loopback, private, or public."""
     try:
-        address = ipaddress.ip_address(ip)
-
-        if address.is_loopback:
+        ip_obj = ipaddress.ip_address(ip_str)
+        if ip_obj.is_loopback:
             return "loopback"
-        if address.is_private:
+        elif ip_obj.is_private:
             return "private"
-        if address.is_link_local:
-            return "link_local"
-        if address.is_multicast:
-            return "multicast"
-        if address.is_reserved:
-            return "reserved"
-
-        return "public"
+        else:
+            return "public"
     except ValueError:
-        return "invalid"
+        return "unknown"
 
 
-def get_network_services(ip):
-    """Collect port states and non-port protocols for a given IP."""
+def get_default_gateway() -> dict:
+    """Get the default gateway IP address and interface."""
+    try:
+        gws = netifaces.gateways()
+        default_gw = gws.get("default", {}).get(netifaces.AF_INET)
+        if default_gw:
+            return {
+                "ip": default_gw[0],
+                "interface": default_gw[1]
+            }
+    except Exception as e:
+        print(f"[-] Error getting gateway: {e}")
+    return None
+
+
+def get_network_services(ip: str) -> dict:
+    """Scans local listening ports and protocol statuses for the given IP address."""
+    ports_data = scan_ports(ip)
+    protocols_data = scan_protocols(ip)
+
+    protocols_data["tcp"] = {
+        "status": "active" if len(ports_data.get("tcp", [])) > 0 else "inactive",
+        "open_count": len(ports_data.get("tcp", []))
+    }
+
+    protocols_data["udp"] = {
+        "status": "active" if len(ports_data.get("udp", [])) > 0 else "inactive",
+        "open_count": len(ports_data.get("udp", []))
+    }
+
     return {
-        "protocols": scan_protocols(ip),
-        "ports": scan_ports(ip),
+        "protocols": protocols_data,
+        "ports": ports_data
     }
 
 
-def get_interface_details():
+def get_interface_details() -> list:
     """Collect information about all network interfaces, including active services."""
     interfaces = []
 
@@ -108,12 +84,14 @@ def get_interface_details():
             "mac": None,
         }
 
+        # MAC address
         link_addresses = addrs.get(netifaces.AF_LINK, [])
         if link_addresses:
             mac = link_addresses[0].get("addr")
             if mac:
                 interface_data["mac"] = mac
 
+        # IPv4 Processing
         ipv4_addresses = addrs.get(netifaces.AF_INET, [])
         for ipv4 in ipv4_addresses:
             ip = ipv4.get("addr")
@@ -137,9 +115,7 @@ def get_interface_details():
 
             if netmask:
                 try:
-                    network = ipaddress.ip_network(
-                        f"{ip}/{netmask}", strict=False
-                    )
+                    network = ipaddress.ip_network(f"{ip}/{netmask}", strict=False)
                     ipv4_data["cidr"] = str(network)
                     ipv4_data["network"] = str(network.network_address)
                     ipv4_data["prefix_length"] = network.prefixlen
@@ -158,6 +134,7 @@ def get_interface_details():
             ipv4_data["services"] = get_network_services(ip)
             interface_data["ipv4"].append(ipv4_data)
 
+        # IPv6 Processing
         ipv6_addresses = addrs.get(netifaces.AF_INET6, [])
         for ipv6 in ipv6_addresses:
             address = ipv6.get("addr")
@@ -165,11 +142,18 @@ def get_interface_details():
                 continue
 
             address_without_scope = address.split("%")[0]
+
+            print(f"[*] Scanning IPv6 protocols on address: {address_without_scope}...")
+            ipv6_protocols = scan_ipv6_protocols(address_without_scope)
+
             interface_data["ipv6"].append({
                 "address": address,
                 "address_without_scope": address_without_scope,
                 "type": classify_ip(address_without_scope),
                 "netmask": ipv6.get("netmask"),
+                "services": {
+                    "protocols": ipv6_protocols
+                }
             })
 
         interfaces.append(interface_data)
@@ -177,35 +161,40 @@ def get_interface_details():
     return interfaces
 
 
-def get_netcity_data():
-    """Assemble system, interface, and service information."""
+def collect_self_data() -> dict:
+    """Collect complete self network and system inspection output."""
     return {
         "netcity_version": "0.1.0",
-        "system": get_system_details(),
-        "network": {
-            "gateway": get_gateway_details(),
-            "interfaces": get_interface_details(),
+        "system": {
+            "hostname": socket.gethostname(),
+            "os": platform.system(),
+            "os_release": platform.release(),
+            "os_version": platform.version(),
+            "architecture": platform.machine(),
+            "processor": platform.processor(),
+            "python_version": platform.python_version(),
+            "platform": platform.platform()
         },
+        "network": {
+            "gateway": get_default_gateway(),
+            "interfaces": get_interface_details()
+        }
     }
 
 
-def save_json(data, filename="netcity_self.json"):
-    """Save output to JSON inside outputs directory."""
-    import json
-    from pathlib import Path
+def main():
+    print("[*] Starting NetCity Self Network Inspection...")
+    data = collect_self_data()
 
-    project_root = Path(__file__).resolve().parent.parent
-    output_dir = project_root / "outputs"
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_file = output_dir / filename
+    output_dir = "outputs"
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "netcity_self.json")
 
-    with open(output_file, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=4)
+    with open(output_path, "w") as f:
+        json.dump(data, f, indent=4)
 
-    print(f"\n[+] JSON saved to: {output_file}")
+    print(f"[+] Scan completed successfully. Results saved to '{output_path}'.")
 
 
 if __name__ == "__main__":
-    print("Starting NetCity Self Scan...")
-    data = get_netcity_data()
-    save_json(data)
+    main()

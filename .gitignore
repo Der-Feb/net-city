@@ -11,3 +11,6 @@ env/
 
 # test outputs
 /outputs/
+
+# dev own documentations
+todo.md
