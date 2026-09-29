@@ -5,9 +5,13 @@ __pycache__/
 *.pyd
 
 # Environment variables & virtual environments
-.env
 venv/
 env/
 
 # test outputs
 /outputs/
+
+# dev own documentations
+todo.md
+config.bat
+node_modules
