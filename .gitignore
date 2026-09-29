@@ -1,2 +1,13 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
-/venv/
+# Environment variables & virtual environments
+.env
+venv/
+env/
+
+# test outputs
+/outputs/
